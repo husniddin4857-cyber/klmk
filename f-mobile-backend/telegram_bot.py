@@ -1,11 +1,13 @@
 import logging
-import asyncio
-from telegram import Update, ReplyKeyboardRemove
+import re
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
 import os
+from flask import Flask, request, jsonify
+import threading
 
 load_dotenv()
 
@@ -18,148 +20,391 @@ logger = logging.getLogger(__name__)
 
 # Bot token from .env
 BOT_TOKEN = os.getenv('telegram_bot_token') or '8606346204:AAHXKuTfA6FkRZzxipBTAXA_6lopoygPonQ'
-
-# API URL
-API_URL = os.getenv('API_URL', 'http://localhost:5001/api')
+API_URL = os.getenv('API_URL', 'http://localhost:5002/api')
 
 # Conversation states
 WAITING_FOR_PHONE = 1
 
+# Global variable to store bot application
+bot_app = None
+
+# Flask app for webhook
+flask_app = Flask(__name__)
+
+# Store user telegram IDs by customer ID
+user_telegram_ids = {}
+
+def normalize_phone(phone: str) -> str:
+    """Normalize phone number for comparison"""
+    normalized = re.sub(r'\D', '', phone)
+    if len(normalized) > 12:
+        normalized = normalized[-12:]
+    return normalized
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show main menu"""
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+    
+    try:
+        customer_id = context.user_data.get('customer_id')
+        customer_name = context.user_data.get('customer_name')
+        
+        if customer_id:
+            # Menu for registered customers
+            menu_buttons = [
+                [KeyboardButton(text="📋 Qarzlar")],
+                [KeyboardButton(text="📦 Oxirgi Savdo")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(menu_buttons, resize_keyboard=True)
+            
+            await update.message.reply_text(
+                f"👋 Salom, {customer_name}!\n\n"
+                "Quyidagi variantlardan birini tanlang:",
+                reply_markup=reply_markup
+            )
+            logger.info(f"✅ Menu shown for registered customer: {customer_name}")
+        else:
+            # Menu for new users
+            contact_button = KeyboardButton(text="📱 Telefon raqamni ulashing", request_contact=True)
+            reply_markup = ReplyKeyboardMarkup([[contact_button]], one_time_keyboard=True, resize_keyboard=True)
+            
+            await update.message.reply_text(
+                "Salom! 👋\n\n"
+                "F-Mobile Do'kon Boshqaruv Tizimi Telegram Bot-iga xush kelibsiz!\n\n"
+                "Iltimos, telefon raqamingizni ulashing:",
+                reply_markup=reply_markup
+            )
+            logger.info(f"✅ Menu shown for new user")
+    except Exception as e:
+        logger.error(f"❌ Error showing menu: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start command - ask for customer phone"""
+    """Start command"""
     user = update.effective_user
-    telegram_id = str(user.id)
+    logger.info(f"👤 /start command from user: {user.id} ({user.first_name})")
     
-    welcome_text = f"Salom, hurmatli {user.first_name}! 👋\n\nF-Mobile Do'kon Boshqaruv Tizimi Telegram Bot-iga xush kelibsiz!"
+    context.user_data['customer_id'] = None
+    context.user_data['customer_name'] = None
+    context.user_data['telegram_id'] = str(user.id)
     
-    await update.message.reply_text(welcome_text)
-    await update.message.reply_text(
-        "Iltimos, o'zingizning telefon raqamingizni yuboring:\n\n"
-        "Misol: +998918959373"
-    )
+    await show_main_menu(update, context)
     
-    # Store telegram_id in context for later use
-    context.user_data['telegram_id'] = telegram_id
-    
+    logger.info(f"✅ Start command completed for user {user.id}")
     return WAITING_FOR_PHONE
 
 async def get_customer_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Get customer info by phone number and register telegram ID"""
-    phone_input = update.message.text.strip()
-    telegram_id = context.user_data.get('telegram_id')
+    """Get customer info by phone"""
+    telegram_id = str(update.effective_user.id)
     
-    logger.info(f"🔍 Qidirish: {phone_input}, Telegram ID: {telegram_id}")
+    # Agar contact ulashilsa
+    if update.message.contact:
+        phone_input = update.message.contact.phone_number
+        logger.info(f"📱 Contact ulashildi: {phone_input}")
+    else:
+        # Agar text yuborilinsa
+        phone_input = update.message.text.strip()
+        logger.info(f"📱 Telefon qidirish: {phone_input}")
     
     try:
-        customer = None
-        customer_id = None
+        normalized_input = normalize_phone(phone_input)
+        logger.info(f"📱 Normalized: {normalized_input}")
         
-        # Get all customers
-        logger.info(f"📍 Barcha mijozlarni qidirish...")
-        all_customers_response = requests.get(
-            f'{API_URL}/customers/public/all',
-            headers={'Content-Type': 'application/json'},
-            timeout=5
-        )
-        
-        logger.info(f"📊 Barcha mijozlar javob: {all_customers_response.status_code}")
-        
-        if all_customers_response.status_code == 200:
-            all_customers_data = all_customers_response.json()
-            all_customers = all_customers_data.get('data') or all_customers_data or []
-            
-            logger.info(f"📋 Jami mijozlar: {len(all_customers)}")
-            
-            # Search for customer by phone
-            for cust in all_customers:
-                phone = cust.get('phone', '').replace(' ', '').replace('-', '')
-                search_phone = phone_input.replace(' ', '').replace('-', '')
-                
-                logger.info(f"🔎 Tekshirish: {phone} == {search_phone}")
-                
-                if phone == search_phone or cust.get('phone') == phone_input:
-                    customer = cust
-                    customer_id = cust.get('_id')
-                    logger.info(f"✅ Telefon bilan topildi: {customer}")
-                    break
-        
-        if not customer or not customer_id:
-            logger.warning(f"⚠️ Mijoz topilmadi: {phone_input}")
-            await update.message.reply_text(
-                "❌ Mijoz topilmadi. Iltimos, to'g'ri telefon raqamni kiriting."
-            )
-            await update.message.reply_text("Boshqa telefon raqamni kiriting:")
+        if not normalized_input or len(normalized_input) < 9:
+            await update.message.reply_text("❌ Telefon raqami noto'g'ri. Qayta kiriting.")
             return WAITING_FOR_PHONE
         
-        # Register telegram ID for this customer
-        logger.info(f"📝 Telegram ID ni ro'yxatga olish: {customer_id} -> {telegram_id}")
-        update_response = requests.put(
-            f'{API_URL}/customers/{customer_id}',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN", "")}'
-            },
-            json={'telegramUserId': telegram_id},
-            timeout=5
-        )
+        # Get all customers
+        logger.info(f"🔍 API qidirish: {API_URL}/customers/public/all")
+        response = requests.get(f'{API_URL}/customers/public/all', timeout=15)
+        logger.info(f"📊 Status: {response.status_code}")
         
-        if update_response.status_code in [200, 201]:
-            logger.info(f"✅ Telegram ID muvaffaqiyatli ro'yxatga olindi")
-        else:
-            logger.warning(f"⚠️ Telegram ID ro'yxatga olishda xato: {update_response.status_code}")
+        if response.status_code != 200:
+            await update.message.reply_text("❌ API bilan bog'lanishda xato.")
+            return WAITING_FOR_PHONE
         
-        # Fetch sales for this customer
-        sales_response = requests.get(
-            f'{API_URL}/sales/public/all',
-            headers={'Content-Type': 'application/json'},
-            timeout=5
-        )
+        data = response.json()
+        customers = data.get('data', []) if isinstance(data, dict) else data
         
-        sales_data = sales_response.json()
-        all_sales = sales_data.get('data') or sales_data or []
+        if not isinstance(customers, list):
+            customers = []
         
-        # Filter sales for this customer
-        customer_sales = [
-            sale for sale in all_sales 
-            if (isinstance(sale.get('customer'), dict) and sale.get('customer', {}).get('_id') == customer_id) or 
-               sale.get('customer') == customer_id
-        ]
+        logger.info(f"📋 Jami mijozlar: {len(customers)}")
         
-        # Build response message
-        debt = customer.get('debt', 0)
-        total_purchase = customer.get('totalPurchase', 0)
+        # Search customer
+        customer = None
+        for cust in customers:
+            cust_phone = cust.get('phone', '')
+            normalized_cust = normalize_phone(cust_phone)
+            logger.info(f"🔎 Tekshirish: {normalized_cust} == {normalized_input}")
+            
+            if normalized_cust == normalized_input:
+                customer = cust
+                logger.info(f"✅ Topildi: {cust.get('name')}")
+                break
+        
+        if not customer:
+            await update.message.reply_text("❌ Mijoz topilmadi. Qayta kiriting:")
+            return WAITING_FOR_PHONE
+        
+        # Store customer info
+        customer_id = customer.get('_id')
+        customer_name = customer.get('name', 'Noma\'lum')
+        context.user_data['customer_id'] = customer_id
+        context.user_data['customer_name'] = customer_name
+        
+        # Store telegram ID for this customer
+        user_telegram_ids[customer_id] = telegram_id
+        logger.info(f"💾 Telegram ID saqlandi: {customer_id} -> {telegram_id}")
+        
+        # Update customer in database with telegram ID
+        try:
+            update_response = requests.put(
+                f'{API_URL}/customers/public/{customer_id}/telegram',
+                json={'telegramUserId': telegram_id},
+                timeout=10
+            )
+            if update_response.status_code == 200:
+                logger.info(f"✅ Telegram ID bazaga saqlandi: {telegram_id}")
+            else:
+                logger.warning(f"⚠️ Telegram ID bazaga saqlanmadi: {update_response.status_code}")
+        except Exception as e:
+            logger.error(f"❌ Telegram ID saqlanishda xato: {e}")
+        
+        # Show customer info
         name = customer.get('name', 'Noma\'lum')
         phone = customer.get('phone', 'Noma\'lum')
-        address = customer.get('address', 'Noma\'lum')
+        address = customer.get('address', 'Kiritilmagan')
+        debt = customer.get('debt', 0)
+        total_purchase = customer.get('totalPurchase', 0)
         
-        logger.info(f"📊 Customer data: name={name}, phone={phone}, debt={debt}, total={total_purchase}")
+        # Remove keyboard
+        from telegram import ReplyKeyboardRemove
         
         message = f"""
 📋 MIJOZ MA'LUMOTLARI
-{'='*40}
+{'='*50}
 
-👤 Ismi: {name}
+👤 Hurmatli {name}!
 📱 Telefon: {phone}
 📍 Manzil: {address}
 
 💰 QARZ VA SAVDO
-{'='*40}
+{'='*50}
 
 💵 Jami Qarz: ${debt:.2f}
 🛍️ Jami Savdolar: ${total_purchase:.2f}
-📊 Savdo Soni: {len(customer_sales)}
 
-✅ Telegram ID muvaffaqiyatli ro'yxatga olindi!
-Endi savdo cheklari shu yerga yuboriladi.
+✅ Muvaffaqiyatli ro'yxatga oldingiz!
         """
         
+        await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
+        
+        # Show menu
+        await show_main_menu(update, context)
+        
+        return WAITING_FOR_PHONE
+        
+    except Exception as e:
+        logger.error(f"❌ Xato: {e}")
+        await update.message.reply_text(f"❌ Xato: {str(e)}")
+        return WAITING_FOR_PHONE
+
+async def last_sale_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show last sale"""
+    logger.info("📦 Oxirgi Savdo buyrug'i")
+    
+    customer_id = context.user_data.get('customer_id')
+    customer_name = context.user_data.get('customer_name')
+    logger.info(f"📦 Customer ID: {customer_id}, Name: {customer_name}")
+    
+    if not customer_id:
+        await update.message.reply_text("❌ Avval /start bosing va telefon raqamingizni kiriting.")
+        return
+    
+    try:
+        # Get sales
+        logger.info(f"🔍 Savdolar qidirish")
+        sales_response = requests.get(f'{API_URL}/sales/public/all', timeout=15)
+        logger.info(f"📊 Sales status: {sales_response.status_code}")
+        
+        customer_sales = []
+        if sales_response.status_code == 200:
+            sales_data = sales_response.json()
+            all_sales = sales_data.get('data', []) if isinstance(sales_data, dict) else sales_data
+            
+            if isinstance(all_sales, list):
+                for sale in all_sales:
+                    sale_customer = sale.get('customer')
+                    if isinstance(sale_customer, dict):
+                        if sale_customer.get('_id') == customer_id:
+                            customer_sales.append(sale)
+                    elif isinstance(sale_customer, str):
+                        if sale_customer == customer_id:
+                            customer_sales.append(sale)
+        
+        if not customer_sales:
+            await update.message.reply_text("❌ Savdolar topilmadi")
+            return
+        
+        # Get last sale
+        last_sale = customer_sales[-1]
+        
+        try:
+            sale_date = datetime.fromisoformat(
+                last_sale.get('createdAt', '').replace('Z', '+00:00')
+            ).strftime('%d.%m.%Y %H:%M')
+        except:
+            sale_date = 'Noma\'lum'
+        
+        # Build message
+        message = f"""
+📦 OXIRGI SAVDO
+{'='*50}
+
+👤 Mijoz: {customer_name}
+📅 Sana: {sale_date}
+
+📋 MAHSULOTLAR:
+"""
+        
+        for item in last_sale.get('items', []):
+            qty = item.get('quantity', 0)
+            product = item.get('product', {})
+            if isinstance(product, dict):
+                name_prod = product.get('name', 'Mahsulot')
+            else:
+                name_prod = 'Mahsulot'
+            price = item.get('price', 0)
+            total = item.get('total', 0)
+            message += f"\n• {name_prod} x{qty} = ${total:.2f}"
+        
+        total_amount = float(last_sale.get('totalAmount', 0))
+        paid_amount = float(last_sale.get('paidAmount', 0))
+        sale_debt = max(0, total_amount - paid_amount)
+        
+        message += f"""
+
+{'='*50}
+
+💰 Jami: ${total_amount:.2f}
+✅ To'langan: ${paid_amount:.2f}
+💳 Qarz: ${sale_debt:.2f}
+
+Rahmat! 🙏
+        """
+        
+        logger.info(f"✅ Oxirgi savdo yuborildi")
         await update.message.reply_text(message)
         
-        # Show recent sales
-        if customer_sales:
-            sales_message = "\n📜 SO'NGGI SAVDOLAR:\n" + "="*40 + "\n"
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ Timeout xatosi")
+        await update.message.reply_text("❌ API javob bermayapti. Qayta urinib ko'ring.")
+    except requests.exceptions.ConnectionError:
+        logger.error(f"❌ Connection xatosi")
+        await update.message.reply_text("❌ Backend bilan bog'lanishda xato.")
+    except Exception as e:
+        logger.error(f"❌ Oxirgi savdo xatosi: {e}")
+        await update.message.reply_text(f"❌ Xato: {str(e)[:100]}")
+
+async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle menu button clicks"""
+    text = update.message.text
+    logger.info(f"🔘 Message received: {text}")
+    
+    # Check if it's a menu button
+    if text == "📋 Qarzlar":
+        logger.info(f"� Qarzlar button clicked")
+        await debts_command(update, context)
+    elif text == "📦 Oxirgi Savdo":
+        logger.info(f"🔘 Oxirgi Savdo button clicked")
+        await last_sale_command(update, context)
+    else:
+        # Treat as phone number input
+        logger.info(f"🔘 Treating as phone number: {text}")
+        await get_customer_info(update, context)
+    
+    return WAITING_FOR_PHONE
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show balance"""
+    logger.info("📊 /balans buyrug'i")
+    
+    customer_id = context.user_data.get('customer_id')
+    logger.info(f"📊 Customer ID: {customer_id}")
+    
+    if not customer_id:
+        await update.message.reply_text("❌ Avval /start bosing va telefon raqamingizni kiriting.")
+        return
+    
+    try:
+        # Get customer
+        logger.info(f"🔍 Mijoz qidirish: {customer_id}")
+        cust_response = requests.get(f'{API_URL}/customers/public/{customer_id}', timeout=15)
+        logger.info(f"📊 Customer status: {cust_response.status_code}")
+        
+        if cust_response.status_code != 200:
+            await update.message.reply_text("❌ Mijoz ma'lumotlarini yuklashda xato.")
+            return
+        
+        cust_data = cust_response.json()
+        customer = cust_data.get('data', {}) if isinstance(cust_data, dict) else cust_data
+        
+        name = customer.get('name', 'Noma\'lum')
+        phone = customer.get('phone', 'Noma\'lum')
+        debt = float(customer.get('debt', 0))
+        total_purchase = float(customer.get('totalPurchase', 0))
+        
+        logger.info(f"📊 Customer data: debt={debt}, totalPurchase={total_purchase}")
+        
+        # Get sales
+        logger.info(f"🔍 Savdolar qidirish")
+        sales_response = requests.get(f'{API_URL}/sales/public/all', timeout=15)
+        logger.info(f"📊 Sales status: {sales_response.status_code}")
+        
+        customer_sales = []
+        if sales_response.status_code == 200:
+            sales_data = sales_response.json()
+            all_sales = sales_data.get('data', []) if isinstance(sales_data, dict) else sales_data
             
-            for i, sale in enumerate(customer_sales[-5:], 1):  # Last 5 sales
+            if isinstance(all_sales, list):
+                for sale in all_sales:
+                    sale_customer = sale.get('customer')
+                    if isinstance(sale_customer, dict):
+                        if sale_customer.get('_id') == customer_id:
+                            customer_sales.append(sale)
+                    elif isinstance(sale_customer, str):
+                        if sale_customer == customer_id:
+                            customer_sales.append(sale)
+        
+        # Calculate total items
+        total_items = 0
+        for sale in customer_sales:
+            for item in sale.get('items', []):
+                total_items += item.get('quantity', 0)
+        
+        # Build message
+        message = f"""
+💰 BALANS MA'LUMOTLARI
+{'='*50}
+
+👤 Hurmatli {name}!
+📱 Telefon: {phone}
+
+📊 QARZ VA SAVDO
+{'='*50}
+
+💵 Jami Qarz: ${debt:.2f}
+🛍️ Jami Savdolar: ${total_purchase:.2f}
+📦 Jami Mahsulot: {total_items} ta
+📜 Savdo Soni: {len(customer_sales)} ta
+        """
+        
+        # Add recent sales
+        if customer_sales:
+            message += "\n\n📜 SO'NGGI SAVDOLAR:\n"
+            for i, sale in enumerate(customer_sales[-3:], 1):
                 try:
                     sale_date = datetime.fromisoformat(
                         sale.get('createdAt', '').replace('Z', '+00:00')
@@ -167,93 +412,298 @@ Endi savdo cheklari shu yerga yuboriladi.
                 except:
                     sale_date = 'Noma\'lum'
                 
-                # Handle items - product can be string or object
-                items_text_list = []
+                items_list = []
                 for item in sale.get('items', []):
-                    quantity = item.get('quantity', 0)
+                    qty = item.get('quantity', 0)
                     product = item.get('product', {})
-                    
-                    # If product is a string (ID), just show quantity
-                    if isinstance(product, str):
-                        items_text_list.append(f"x{quantity}")
+                    if isinstance(product, dict):
+                        name_prod = product.get('name', 'Mahsulot')
                     else:
-                        # If product is an object, show name
-                        product_name = product.get('name', 'Noma\'lum') if isinstance(product, dict) else 'Noma\'lum'
-                        items_text_list.append(f"{product_name} x{quantity}")
+                        name_prod = 'Mahsulot'
+                    items_list.append(f"{name_prod} x{qty}")
                 
-                items_text = ", ".join(items_text_list) if items_text_list else "Noma\'lum"
-                
-                debt_amount = sale.get('debt', 0)
-                paid_amount = sale.get('paidAmount', 0)
+                items_text = ", ".join(items_list) if items_list else "Noma\'lum"
                 total_amount = sale.get('totalAmount', 0)
+                paid_amount = sale.get('paidAmount', 0)
                 
-                sales_message += f"""
-{i}. Sana: {sale_date}
-   Mahsulotlar: {items_text}
-   Jami: ${total_amount:.2f}
-   To'langan: ${paid_amount:.2f}
-   Qarz: ${debt_amount:.2f}
-"""
-            
-            await update.message.reply_text(sales_message)
-        else:
-            await update.message.reply_text("📭 Bu mijozning savdolari yo'q")
+                message += f"\n{i}. 📅 {sale_date}\n"
+                message += f"   📦 {items_text}\n"
+                message += f"   💰 Jami: ${total_amount:.2f}\n"
+                message += f"   ✅ To'langan: ${paid_amount:.2f}\n"
         
-        return WAITING_FOR_PHONE
+        logger.info(f"✅ Balans yuborildi")
+        await update.message.reply_text(message)
         
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error: {e}")
-        await update.message.reply_text(
-            f"❌ API bilan bog'lanishda xato: {str(e)}\n\nIltimos, qayta urinib ko'ring."
-        )
-        await update.message.reply_text("Telefon raqamni kiriting:")
-        return WAITING_FOR_PHONE
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ Timeout xatosi")
+        await update.message.reply_text("❌ API javob bermayapti. Qayta urinib ko'ring.")
+    except requests.exceptions.ConnectionError:
+        logger.error(f"❌ Connection xatosi")
+        await update.message.reply_text("❌ Backend bilan bog'lanishda xato. Backend ishga tushganligini tekshiring.")
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text(
-            f"❌ Xato yuz berdi: {str(e)}\n\nIltimos, qayta urinib ko'ring."
-        )
-        await update.message.reply_text("Telefon raqamni kiriting:")
-        return WAITING_FOR_PHONE
+        logger.error(f"❌ Balans xatosi: {e}")
+        await update.message.reply_text(f"❌ Xato: {str(e)[:100]}")
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancel operation"""
-    await update.message.reply_text(
-        "Bekor qilindi. /start bosing qayta boshlash uchun.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
+async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show debts and purchases"""
+    logger.info("💳 /qarzlar buyrug'i")
+    
+    customer_id = context.user_data.get('customer_id')
+    customer_name = context.user_data.get('customer_name')
+    logger.info(f"💳 Customer ID: {customer_id}, Name: {customer_name}")
+    
+    if not customer_id:
+        await update.message.reply_text("❌ Avval /start bosing va telefon raqamingizni kiriting.")
+        return
+    
+    try:
+        # Get customer
+        logger.info(f"🔍 Mijoz qidirish: {customer_id}")
+        cust_response = requests.get(f'{API_URL}/customers/public/{customer_id}', timeout=15)
+        logger.info(f"📊 Customer status: {cust_response.status_code}")
+        
+        if cust_response.status_code != 200:
+            await update.message.reply_text("❌ Mijoz ma'lumotlarini yuklashda xato.")
+            return
+        
+        cust_data = cust_response.json()
+        customer = cust_data.get('data', {}) if isinstance(cust_data, dict) else cust_data
+        
+        name = customer.get('name', 'Noma\'lum')
+        phone = customer.get('phone', 'Noma\'lum')
+        debt = float(customer.get('debt', 0))
+        total_purchase = float(customer.get('totalPurchase', 0))
+        
+        logger.info(f"💳 Customer data: debt={debt}, totalPurchase={total_purchase}")
+        
+        # Get sales
+        logger.info(f"🔍 Savdolar qidirish")
+        sales_response = requests.get(f'{API_URL}/sales/public/all', timeout=15)
+        logger.info(f"📊 Sales status: {sales_response.status_code}")
+        
+        customer_sales = []
+        if sales_response.status_code == 200:
+            sales_data = sales_response.json()
+            all_sales = sales_data.get('data', []) if isinstance(sales_data, dict) else sales_data
+            
+            if isinstance(all_sales, list):
+                for sale in all_sales:
+                    sale_customer = sale.get('customer')
+                    if isinstance(sale_customer, dict):
+                        if sale_customer.get('_id') == customer_id:
+                            customer_sales.append(sale)
+                    elif isinstance(sale_customer, str):
+                        if sale_customer == customer_id:
+                            customer_sales.append(sale)
+        
+        # Build message
+        message = f"""
+💳 QARZLAR VA SAVDOLAR
+{'='*50}
+
+👤 Hurmatli {name}!
+📱 Telefon: {phone}
+
+📊 UMUMIY MA'LUMOTLAR
+{'='*50}
+
+💵 Jami Qarz: ${debt:.2f}
+🛍️ Jami Savdolar: ${total_purchase:.2f}
+📜 Savdo Soni: {len(customer_sales)} ta
+
+{'='*50}
+📋 BARCHA SAVDOLAR RO'YXATI
+{'='*50}
+"""
+        
+        if customer_sales:
+            for i, sale in enumerate(customer_sales, 1):
+                try:
+                    sale_date = datetime.fromisoformat(
+                        sale.get('createdAt', '').replace('Z', '+00:00')
+                    ).strftime('%d.%m.%Y %H:%M')
+                except:
+                    sale_date = 'Noma\'lum'
+                
+                items_list = []
+                for item in sale.get('items', []):
+                    qty = item.get('quantity', 0)
+                    product = item.get('product', {})
+                    if isinstance(product, dict):
+                        name_prod = product.get('name', 'Mahsulot')
+                    else:
+                        name_prod = 'Mahsulot'
+                    items_list.append(f"{name_prod} x{qty}")
+                
+                items_text = ", ".join(items_list) if items_list else "Noma\'lum"
+                total_amount = float(sale.get('totalAmount', 0))
+                paid_amount = float(sale.get('paidAmount', 0))
+                sale_debt = max(0, total_amount - paid_amount)
+                
+                message += f"\n{i}. 📅 {sale_date}\n"
+                message += f"   📦 Mahsulotlar: {items_text}\n"
+                message += f"   💰 Jami: ${total_amount:.2f}\n"
+                message += f"   ✅ To'langan: ${paid_amount:.2f}\n"
+                message += f"   💳 Qarz: ${sale_debt:.2f}\n"
+        else:
+            message += "\n❌ Savdolar topilmadi"
+        
+        logger.info(f"✅ Qarzlar yuborildi")
+        await update.message.reply_text(message)
+        
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ Timeout xatosi")
+        await update.message.reply_text("❌ API javob bermayapti. Qayta urinib ko'ring.")
+    except requests.exceptions.ConnectionError:
+        logger.error(f"❌ Connection xatosi")
+        await update.message.reply_text("❌ Backend bilan bog'lanishda xato. Backend ishga tushganligini tekshiring.")
+    except Exception as e:
+        logger.error(f"❌ Qarzlar xatosi: {e}")
+        await update.message.reply_text(f"❌ Xato: {str(e)[:100]}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help command"""
-    help_text = """
+    """Help"""
+    await update.message.reply_text("""
 🤖 BOT BUYRUQLARI:
 
-/start - Botni boshlash va Telegram ID ni ro'yxatga olish
+/start - Botni boshlash
+/balans - Balansni ko'rish
+/qarzlar - Qarzlar va savdolarni ko'rish
 /help - Yordam
 /cancel - Bekor qilish
 
 📝 FOYDALANISH:
 1. /start bosing
-2. O'zingizning telefon raqamingizni kiriting
-3. Bot sizga ma'lumotlaringizni ko'rsatadi
-4. Savdo cheklari shu yerga yuboriladi
+2. Telefon raqamingizni kiriting
+3. /qarzlar bosing qarzlarni ko'rish uchun
+    """)
 
-💡 MISOL:
-Telefon: +998918959373
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel"""
+    await update.message.reply_text("Bekor qilindi. /start bosing qayta boshlash uchun.")
+    return ConversationHandler.END
+
+# Flask webhook endpoints
+@flask_app.route('/webhook/sale', methods=['POST'])
+def webhook_sale():
+    """Webhook for new sales"""
+    try:
+        data = request.json
+        logger.info(f"📨 Webhook sale qabul qilindi: {data}")
+        
+        customer_id = data.get('customer_id')
+        customer_name = data.get('customer_name')
+        items = data.get('items', [])
+        total_amount = data.get('total_amount', 0)
+        paid_amount = data.get('paid_amount', 0)
+        
+        logger.info(f"📨 Customer ID: {customer_id}, Name: {customer_name}")
+        logger.info(f"📨 Items: {len(items)}, Total: {total_amount}, Paid: {paid_amount}")
+        
+        # Get telegram ID for this customer
+        telegram_id = user_telegram_ids.get(customer_id)
+        logger.info(f"📨 Telegram ID from memory: {telegram_id}")
+        
+        if not telegram_id:
+            logger.warning(f"⚠️ Telegram ID topilmadi memory-da: {customer_id}")
+            # Try to get from database
+            try:
+                response = requests.get(f'{API_URL}/customers/public/{customer_id}', timeout=10)
+                if response.status_code == 200:
+                    customer_data = response.json()
+                    customer = customer_data.get('data', {}) if isinstance(customer_data, dict) else customer_data
+                    telegram_id = customer.get('telegramUserId')
+                    logger.info(f"📨 Telegram ID from database: {telegram_id}")
+                    
+                    if telegram_id:
+                        user_telegram_ids[customer_id] = telegram_id
+            except Exception as e:
+                logger.error(f"❌ Database qidirish xatosi: {e}")
+            
+            if not telegram_id:
+                logger.warning(f"⚠️ Telegram ID topilmadi: {customer_id}")
+                return jsonify({'success': False, 'error': 'Telegram ID not found'}), 404
+        
+        # Build receipt message
+        receipt = f"""
+📋 SAVDO CHEKI
+{'='*50}
+
+� Mijoz: {customer_name}
+
+📦 MAHSULOTLAR:
 """
-    await update.message.reply_text(help_text)
+        
+        for item in items:
+            product_name = item.get('product_name', 'Mahsulot')
+            quantity = item.get('quantity', 0)
+            price = item.get('price', 0)
+            total = item.get('total', 0)
+            receipt += f"\n{product_name} x{quantity} = ${total:.2f}"
+        
+        receipt += f"""
+
+{'='*50}
+
+💰 JAMI: ${total_amount:.2f}
+✅ TO'LANGAN: ${paid_amount:.2f}
+💵 QARZ: ${max(0, total_amount - paid_amount):.2f}
+
+Rahmat, yana kelishingizni kutamiz! 🙏
+        """
+        
+        # Send message to customer via bot
+        if bot_app:
+            try:
+                # Use asyncio to run async function
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(bot_app.bot.send_message(chat_id=telegram_id, text=receipt))
+                loop.close()
+                logger.info(f"✅ Chek yuborildi: {telegram_id}")
+                return jsonify({'success': True, 'message': 'Receipt sent'}), 200
+            except Exception as e:
+                logger.error(f"❌ Chek yuborishda xato: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+        else:
+            logger.error("❌ Bot app ishga tushmagan")
+            return jsonify({'success': False, 'error': 'Bot not initialized'}), 500
+            
+    except Exception as e:
+        logger.error(f"❌ Webhook xatosi: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@flask_app.route('/webhook/health', methods=['GET'])
+def webhook_health():
+    """Health check"""
+    return jsonify({'status': 'OK', 'bot_running': bot_app is not None}), 200
+
+def run_flask():
+    """Run Flask app in separate thread"""
+    logger.info("🌐 Flask webhook server ishga tushmoqda...")
+    flask_app.run(host='0.0.0.0', port=5002, debug=False)
 
 def main() -> None:
-    """Start the bot"""
+    """Start bot"""
+    global bot_app
+    
     if not BOT_TOKEN:
-        print("❌ Bot token topilmadi! .env faylida telegram_bot_token qo'shing")
+        print("❌ Bot token topilmadi!")
         return
     
     print("🤖 Bot ishga tushmoqda...")
+    print(f"🔗 API URL: {API_URL}")
+    print(f"🔑 Token: {BOT_TOKEN[:20]}...")
     
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        bot_app = application
+    except Exception as e:
+        print(f"❌ Bot initialization xatosi: {e}")
+        print("💡 Telegram bot library bilan muammo. Qayta o'rnatib ko'ring:")
+        print("pip install --upgrade python-telegram-bot")
+        return
     
     # Conversation handler
     conv_handler = ConversationHandler(
@@ -261,22 +711,45 @@ def main() -> None:
         states={
             WAITING_FOR_PHONE: [
                 CommandHandler('start', start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_customer_info)
+                CommandHandler('balans', balance_command),
+                CommandHandler('qarzlar', debts_command),
+                CommandHandler('help', help_command),
+                CommandHandler('cancel', cancel),
+                MessageHandler(filters.CONTACT, get_customer_info),  # Contact button
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons)  # Menu buttons or text input
             ]
         },
-        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)]
+        fallbacks=[CommandHandler('cancel', cancel)]
     )
     
-    # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('balans', balance_command))
+    application.add_handler(CommandHandler('qarzlar', debts_command))
     
-    # Start bot
+    # Add error handler
+    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Log the error and send a telegram message to notify the developer."""
+        logger.error(msg="Exception while handling an update:", exc_info=context.error)
+        logger.error(f"❌ Update: {update}")
+        logger.error(f"❌ Error: {context.error}")
+    
+    application.add_error_handler(error_handler)
+    
+    # Start Flask webhook server in separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
     print("✅ Bot muvaffaqiyatli ishga tushdi!")
-    print("🔗 API URL:", API_URL)
-    print("📱 Bot token:", BOT_TOKEN[:20] + "..." if BOT_TOKEN else "NOT SET")
+    print("🌐 Webhook server: http://localhost:5002/webhook/sale")
+    print("⏳ Bot polling rejimida ishga tushmoqda...")
     
-    application.run_polling()
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        print(f"❌ Bot xatosi: {e}")
+        print("💡 Token to'g'ri ekanligini tekshiring!")
+        print("💡 @BotFather dan yangi token oling va .env fayliga qo'ying")
 
 if __name__ == '__main__':
     main()

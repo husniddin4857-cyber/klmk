@@ -14,6 +14,7 @@ router.get('/public/all', async (req, res) => {
       .populate('cashier', 'username')
       .populate('branch', 'name')
       .populate('customer', 'name phone')
+      .populate('items.product', 'name')
       .sort({ createdAt: -1 });
 
     console.log(`✅ Found ${sales.length} sales`);
@@ -41,6 +42,7 @@ router.get('/', auth, async (req, res) => {
       .populate('cashier', 'username')
       .populate('branch', 'name')
       .populate('customer', 'name phone')
+      .populate('items.product', 'name')
       .sort({ createdAt: -1 });
 
     res.json({ success: true, data: sales });
@@ -52,31 +54,71 @@ router.get('/', auth, async (req, res) => {
 // Create sale
 router.post('/', auth, async (req, res) => {
   try {
-    const { branch, customer, items, totalAmount, paidAmount, currency, paymentType, notes } = req.body;
+    const { branch, customer, items, totalAmount, paidAmount, change, currency, paymentMethods, notes } = req.body;
 
     if (!branch || !items || items.length === 0 || !totalAmount) {
       return res.status(400).json({ success: false, error: 'Invalid sale data' });
     }
 
-    // Calculate debt based on payment type
-    let debt = 0;
-    if (paymentType === 'debt') {
-      // Full debt - customer pays nothing
-      debt = totalAmount;
-    } else if (paymentType === 'split') {
-      // 50-50 split - customer pays 50%, rest is debt
-      debt = totalAmount / 2;
-    } else {
-      // Cash payment - debt is only if paid less than total
-      debt = Math.max(0, totalAmount - paidAmount);
+    if (!paymentMethods || paymentMethods.length === 0) {
+      return res.status(400).json({ success: false, error: 'Payment methods required' });
     }
 
-    // Update product stock
+    // Calculate total paid and debt
+    const totalPaid = paymentMethods.reduce((sum, method) => sum + method.amount, 0);
+    const debt = Math.max(0, totalAmount - totalPaid);
+
+    // Update product stock and mark IMEIs as used
     for (const item of items) {
-      await Product.findByIdAndUpdate(
-        item.product,
-        { $inc: { stock: -item.quantity } }
-      );
+      // If IMEI is provided, mark it as used (don't decrement stock separately)
+      if (item.imei) {
+        try {
+          // Get the FRESH product data each time to avoid stale data
+          const product = await Product.findById(item.product);
+          if (product && product.imeiList && Array.isArray(product.imeiList)) {
+            console.log(`[SALES] Product: ${product.name}, Total IMEIs: ${product.imeiList.length}, Looking for IMEI: "${item.imei}", Quantity to mark: ${item.quantity}`);
+            
+            // Find exactly 'quantity' number of unused IMEIs with this value
+            const imeiIndicesToUpdate = [];
+            for (let i = 0; i < product.imeiList.length && imeiIndicesToUpdate.length < item.quantity; i++) {
+              if (product.imeiList[i] && product.imeiList[i].imei === item.imei && !product.imeiList[i].used) {
+                imeiIndicesToUpdate.push(i);
+              }
+            }
+            
+            console.log(`[SALES] Found ${imeiIndicesToUpdate.length} unused IMEIs matching "${item.imei}", need to mark ${item.quantity}`);
+            
+            if (imeiIndicesToUpdate.length > 0) {
+              // Update each IMEI individually to ensure proper updates
+              for (const index of imeiIndicesToUpdate) {
+                const updateResult = await Product.updateOne(
+                  { _id: item.product },
+                  { $set: { [`imeiList.${index}.used`]: true } }
+                );
+                console.log(`[SALES] Updated IMEI at index ${index}: ${updateResult.modifiedCount} document(s) modified`);
+              }
+              console.log(`[SALES] ✅ Successfully marked ${imeiIndicesToUpdate.length} IMEIs as used (out of ${item.quantity} requested)`);
+              
+              if (imeiIndicesToUpdate.length < item.quantity) {
+                console.warn(`[SALES] ⚠️ Warning: Only marked ${imeiIndicesToUpdate.length} IMEIs but ${item.quantity} were requested`);
+              }
+            } else {
+              console.warn(`[SALES] ⚠️ No unused IMEIs found matching "${item.imei}" for product ${item.product}`);
+            }
+          } else {
+            console.log(`[SALES] No imeiList found for product ${item.product}`);
+          }
+        } catch (err) {
+          console.error(`[SALES] Error updating IMEI for product ${item.product}:`, err.message);
+          throw err;
+        }
+      } else {
+        // If no IMEI, just decrement stock
+        await Product.findByIdAndUpdate(
+          item.product,
+          { $inc: { stock: -item.quantity } }
+        );
+      }
     }
 
     // Get customer info for Telegram notification
@@ -92,6 +134,12 @@ router.post('/', auth, async (req, res) => {
         customer,
         { $inc: { debt: debt, totalPurchase: totalAmount } }
       );
+    } else if (customer) {
+      // Even if no debt, update totalPurchase
+      await Customer.findByIdAndUpdate(
+        customer,
+        { $inc: { totalPurchase: totalAmount } }
+      );
     }
 
     const sale = new Sale({
@@ -100,22 +148,55 @@ router.post('/', auth, async (req, res) => {
       customer,
       items,
       totalAmount,
-      paidAmount: paymentType === 'debt' ? 0 : (paymentType === 'split' ? totalAmount / 2 : paidAmount),
-      change: paymentType === 'debt' ? 0 : (paymentType === 'split' ? 0 : (paidAmount - totalAmount)),
+      paidAmount: totalPaid,
+      change: Math.max(0, change || 0),
       currency,
-      paymentType,
-      debt,
+      paymentMethods,
       notes
     });
 
     await sale.save();
+
+    // Send Telegram notification via webhook
+    if (customer) {
+      try {
+        const itemsForWebhook = items.map(item => ({
+          product_name: item.product?.name || 'Mahsulot',
+          quantity: item.quantity,
+          price: item.price,
+          total: item.total
+        }));
+
+        const webhookData = {
+          customer_id: customer,
+          customer_name: customerData?.name || 'Noma\'lum',
+          items: itemsForWebhook,
+          total_amount: totalAmount,
+          paid_amount: totalPaid
+        };
+
+        console.log('[WEBHOOK] Sending to bot:', webhookData);
+        
+        // Send to bot webhook
+        await fetch('http://localhost:5002/webhook/sale', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(webhookData)
+        }).catch(err => console.log('[WEBHOOK] Error:', err.message));
+      } catch (err) {
+        console.log('[WEBHOOK] Error sending:', err.message);
+      }
+    }
 
     // Send Telegram notification if customer has telegramUserId
     if (customerData && customerData.telegramUserId) {
       console.log('[SALES] Sending Telegram notification to:', customerData.telegramUserId);
       try {
         const itemsText = items.map(item => `${item.quantity}x ${item.product}`).join(', ');
-        const paymentTypeText = paymentType === 'cash' ? 'Naqd' : paymentType === 'debt' ? 'Qarz' : '50-50';
+        const paymentMethodsText = paymentMethods.map(m => {
+          const typeText = m.type === 'cash' ? 'Naqd' : m.type === 'debt' ? 'Qarz' : m.type === 'click' ? 'Click' : 'Terminal';
+          return `${typeText}: ${m.amount.toFixed(2)}`;
+        }).join(', ');
         
         const message = `
 📦 YANGI SAVDO
@@ -128,10 +209,9 @@ ${'='*40}
 
 💰 SUMMA
 ${'='*40}
-Jami: $${totalAmount.toFixed(2)}
-To'lov Turi: ${paymentTypeText}
-To'langan: $${(paymentType === 'debt' ? 0 : (paymentType === 'split' ? totalAmount / 2 : paidAmount)).toFixed(2)}
-Qarz: $${debt.toFixed(2)}
+Jami: ${totalAmount.toFixed(2)}
+To'lov Turlari: ${paymentMethodsText}
+Qarz: ${debt.toFixed(2)}
 
 ✅ Savdo muvaffaqiyatli yakunlandi!
 `;
@@ -196,8 +276,6 @@ router.get('/:id', auth, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
-module.exports = router;
 
 // Delete sale
 router.delete('/:id', auth, async (req, res) => {

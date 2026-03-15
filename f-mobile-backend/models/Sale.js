@@ -27,7 +27,19 @@ const saleSchema = new mongoose.Schema({
     },
     price: {
       type: Number,
-      required: true
+      default: 0
+    },
+    originalPrice: {
+      type: Number,
+      default: 0
+    },
+    salePrice: {
+      type: Number,
+      default: 0
+    },
+    imei: {
+      type: String,
+      default: ''
     },
     total: {
       type: Number,
@@ -51,15 +63,17 @@ const saleSchema = new mongoose.Schema({
     enum: ['USD', 'UZS', 'BOTH'],
     default: 'USD'
   },
-  paymentType: {
-    type: String,
-    enum: ['cash', 'debt', 'split'],
-    default: 'cash'
-  },
-  debt: {
-    type: Number,
-    default: 0
-  },
+  paymentMethods: [{
+    type: {
+      type: String,
+      enum: ['cash', 'debt', 'click', 'terminal'],
+      required: true
+    },
+    amount: {
+      type: Number,
+      required: true
+    }
+  }],
   status: {
     type: String,
     enum: ['completed', 'pending', 'cancelled'],
@@ -71,5 +85,12 @@ const saleSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+// Add indexes for performance
+saleSchema.index({ customer: 1 });
+saleSchema.index({ branch: 1 });
+saleSchema.index({ cashier: 1 });
+saleSchema.index({ createdAt: -1 });
+saleSchema.index({ status: 1 });
 
 module.exports = mongoose.model('Sale', saleSchema);

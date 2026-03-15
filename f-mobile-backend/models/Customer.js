@@ -27,10 +27,10 @@ const customerSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  branch: {
+  branches: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Branch'
-  },
+  }],
   active: {
     type: Boolean,
     default: true
@@ -44,5 +44,11 @@ const customerSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+// Add indexes for performance
+customerSchema.index({ phone: 1 });
+customerSchema.index({ name: 1 });
+customerSchema.index({ branches: 1 });
+customerSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('Customer', customerSchema);

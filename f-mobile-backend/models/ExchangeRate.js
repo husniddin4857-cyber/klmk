@@ -8,12 +8,28 @@ const exchangeRateSchema = new mongoose.Schema({
   },
   rate: {
     type: Number,
-    required: true
+    required: true,
+    min: 0
+  },
+  date: {
+    type: Date,
+    default: Date.now
+  },
+  notes: {
+    type: String,
+    default: ''
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
   },
   updatedAt: {
     type: Date,
     default: Date.now
   }
 });
+
+// Index for faster queries
+exchangeRateSchema.index({ currency: 1, date: -1 });
 
 module.exports = mongoose.model('ExchangeRate', exchangeRateSchema);

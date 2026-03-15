@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import AdminLayout from '@/components/layouts/AdminLayout'
-import { Users, Edit, Trash2, X } from 'lucide-react'
+import { Users, Edit, Trash2, Search } from 'lucide-react'
 import { getCustomers, updateCustomer, deleteCustomer, getBranches } from '@/lib/api'
 
 interface Customer {
@@ -12,6 +12,7 @@ interface Customer {
   phone: string
   email?: string
   address?: string
+  branches?: Array<{ _id: string; name: string }>
   branch?: string | { _id: string; name: string }
   totalPurchase?: number
   debt?: number
@@ -28,6 +29,8 @@ export default function AdminCustomersPage() {
   const [branches, setBranches] = useState<Branch[]>([])
   const [error, setError] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [selectedBranch, setSelectedBranch] = useState<string>('')
   const [formData, setFormData] = useState({
     branch: '',
   })
@@ -40,6 +43,12 @@ export default function AdminCustomersPage() {
     ])
 
     if (customersRes.success && customersRes.data) {
+      console.log('[ADMIN CUSTOMERS] Customers data:', customersRes.data)
+      if (Array.isArray(customersRes.data)) {
+        customersRes.data.forEach((c: any) => {
+          console.log(`  - ${c.name}: branches=${JSON.stringify(c.branches)}, branch=${c.branch}`)
+        })
+      }
       setCustomers(customersRes.data as Customer[])
     } else {
       setError(customersRes.error || 'Mijozlarni yuklashda xato')
@@ -52,9 +61,10 @@ export default function AdminCustomersPage() {
 
   const handleEditBranch = (customer: Customer) => {
     setEditingId(customer._id)
-    const branchId = typeof customer.branch === 'string'
-      ? customer.branch
-      : customer.branch?._id || ''
+    // Get first branch ID if branches array exists
+    const branchId = customer.branches && customer.branches.length > 0
+      ? (typeof customer.branches[0] === 'string' ? customer.branches[0] : customer.branches[0]._id)
+      : ''
     setFormData({ branch: branchId })
   }
 
@@ -63,7 +73,7 @@ export default function AdminCustomersPage() {
 
     setError(null)
     const response = await updateCustomer(editingId, {
-      branch: formData.branch || null
+      branches: formData.branch ? [formData.branch] : []
     })
 
     if (response.success) {
@@ -98,6 +108,16 @@ export default function AdminCustomersPage() {
     }
   }, [router])
 
+  const filteredCustomers = customers.filter(c => {
+    const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.phone.toLowerCase().includes(searchTerm.toLowerCase())
+    
+    const matchesBranch = !selectedBranch || 
+      (c.branches && c.branches.some(b => (typeof b === 'string' ? b : b._id) === selectedBranch))
+    
+    return matchesSearch && matchesBranch
+  })
+
   return (
     <AdminLayout>
       <div className="space-y-6">
@@ -114,6 +134,45 @@ export default function AdminCustomersPage() {
           </div>
         )}
 
+        {/* Search */}
+        <div className="relative">
+          <Search className="absolute left-4 top-3 w-5 h-5 text-gray-500" />
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Ismi yoki telefon raqami bilan qidirish..."
+            className="w-full pl-12 pr-4 py-3 bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        {/* Branch Filter */}
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={() => setSelectedBranch('')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              selectedBranch === ''
+                ? 'bg-blue-600 text-white'
+                : 'bg-slate-800/50 border border-slate-700/50 text-gray-300 hover:bg-slate-700/50'
+            }`}
+          >
+            Barcha Filiallar
+          </button>
+          {branches.map(branch => (
+            <button
+              key={branch._id}
+              onClick={() => setSelectedBranch(branch._id)}
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                selectedBranch === branch._id
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-800/50 border border-slate-700/50 text-gray-300 hover:bg-slate-700/50'
+              }`}
+            >
+              {branch.name}
+            </button>
+          ))}
+        </div>
+
         {/* Customers Table */}
         <div className="bg-gradient-to-br from-white/10 to-white/5 border border-white/20 rounded-2xl overflow-hidden backdrop-blur-sm">
           <div className="overflow-x-auto">
@@ -129,11 +188,7 @@ export default function AdminCustomersPage() {
                 </tr>
               </thead>
               <tbody>
-                {customers.map((customer) => {
-                  const branchName = typeof customer.branch === 'string'
-                    ? branches.find(b => b._id === customer.branch)?.name || 'Noma\'lum'
-                    : customer.branch?.name || 'Noma\'lum'
-
+                {filteredCustomers.map((customer) => {
                   return (
                     <tr key={customer._id} className="border-b border-white/10 hover:bg-white/5 transition">
                       <td className="px-6 py-4 text-white font-medium">{customer.name}</td>
@@ -151,13 +206,23 @@ export default function AdminCustomersPage() {
                             ))}
                           </select>
                         ) : (
-                          <span className={`px-3 py-1 rounded-lg text-sm font-medium ${
-                            branchName === 'Noma\'lum'
-                              ? 'bg-red-500/20 text-red-300'
-                              : 'bg-blue-500/20 text-blue-300'
-                          }`}>
-                            {branchName}
-                          </span>
+                          <div className="flex flex-wrap gap-2">
+                            {customer.branches && customer.branches.length > 0 ? (
+                              customer.branches.map((branch: any) => {
+                                const branchName = typeof branch === 'string' ? branches.find(b => b._id === branch)?.name || 'Noma\'lum' : branch.name
+                                console.log(`[ADMIN] ${customer.name} - branch: ${typeof branch === 'string' ? branch : branch._id} -> ${branchName}`)
+                                return (
+                                  <span key={typeof branch === 'string' ? branch : branch._id} className="px-3 py-1 rounded-lg text-sm font-medium bg-blue-500/20 text-blue-300">
+                                    {branchName}
+                                  </span>
+                                )
+                              })
+                            ) : (
+                              <span className="px-3 py-1 rounded-lg text-sm font-medium bg-red-500/20 text-red-300">
+                                Filial yo\'q
+                              </span>
+                            )}
+                          </div>
                         )}
                       </td>
                       <td className="px-6 py-4 text-green-400 font-semibold">${(customer.totalPurchase || 0).toFixed(2)}</td>
@@ -204,7 +269,7 @@ export default function AdminCustomersPage() {
             </table>
           </div>
 
-          {customers.length === 0 && (
+          {filteredCustomers.length === 0 && (
             <div className="text-center py-12">
               <Users className="w-16 h-16 text-gray-500 mx-auto mb-4" />
               <p className="text-gray-400">Mijozlar topilmadi</p>

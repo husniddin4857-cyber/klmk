@@ -13,8 +13,20 @@ const app = express();
 // Middleware
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:3000' }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    if (duration > 1000) {
+      console.warn(`⚠️  Slow request: ${req.method} ${req.path} took ${duration}ms`);
+    }
+  });
+  next();
+});
 
 // Database Connection
 const connectDB = async () => {
@@ -31,6 +43,9 @@ const connectDB = async () => {
         family: 4, // Use IPv4
       });
       console.log('✓ MongoDB connected successfully');
+      
+      // Run migration after successful connection
+      runMigrations();
     } catch (err) {
       retries++;
       if (retries < maxRetries) {
@@ -47,6 +62,32 @@ const connectDB = async () => {
   attemptConnection();
 };
 
+// Migration function
+const runMigrations = async () => {
+  try {
+    const Customer = require('./models/Customer');
+    
+    // Migrate old branch field to branches array
+    const customersWithOldBranch = await Customer.find({ branch: { $exists: true, $ne: null } });
+    
+    if (customersWithOldBranch.length > 0) {
+      console.log(`[MIGRATION] Found ${customersWithOldBranch.length} customers with old branch field`);
+      
+      for (const customer of customersWithOldBranch) {
+        if (!customer.branches || customer.branches.length === 0) {
+          customer.branches = [customer.branch];
+          await customer.save();
+          console.log(`[MIGRATION] Updated ${customer.name}: branch=${customer.branch} -> branches=[${customer.branch}]`);
+        }
+      }
+      
+      console.log(`[MIGRATION] Migration complete`);
+    }
+  } catch (err) {
+    console.error('[MIGRATION] Error:', err.message);
+  }
+};
+
 connectDB();
 
 // Routes
@@ -58,6 +99,10 @@ app.use('/api/sales', require('./routes/sales'));
 app.use('/api/customers', require('./routes/customers'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/exchange-rate', require('./routes/exchangeRate'));
+app.use('/api/income', require('./routes/income'));
+app.use('/api/expenses', require('./routes/expenses'));
+app.use('/api/imei', require('./routes/imei'));
+app.use('/api/analytics', require('./routes/analytics'));
 
 // Health Check
 app.get('/api/health', (req, res) => {

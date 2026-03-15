@@ -12,6 +12,10 @@ import {
   ShoppingCart,
   LogOut,
   ChevronDown,
+  TrendingUp,
+  TrendingDown,
+  BarChart3,
+  DollarSign,
 } from 'lucide-react'
 
 interface AdminLayoutProps {
@@ -20,7 +24,6 @@ interface AdminLayoutProps {
 
 export default function AdminLayout({ children }: AdminLayoutProps) {
   const router = useRouter()
-  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
@@ -32,11 +35,16 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
 
   const menuItems = [
     { icon: LayoutDashboard, label: 'Dashboard', href: '/admin/dashboard' },
+    { icon: Store, label: 'Asosiy Ombor', href: '/admin/main-warehouse' },
+    { icon: Store, label: 'Ombor', href: '/admin/inventory' },
     { icon: Store, label: 'Filiallar', href: '/admin/branches' },
     { icon: Users, label: 'Kassirlar', href: '/admin/cashiers' },
     { icon: Users, label: 'Mijozlar', href: '/admin/customers' },
-    { icon: ShoppingCart, label: 'Ombor', href: '/admin/inventory' },
     { icon: ShoppingCart, label: 'Savdolar', href: '/admin/sales' },
+    { icon: DollarSign, label: 'Kassa', href: '/admin/cashier-register' },
+    { icon: TrendingDown, label: 'Qarzdorlar', href: '/admin/debtors' },
+    { icon: TrendingDown, label: 'Xarajatlar', href: '/admin/expenses' },
+    { icon: DollarSign, label: 'Dollar Kursi', href: '/admin/exchange-rate' },
   ]
 
   return (

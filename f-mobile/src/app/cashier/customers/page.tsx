@@ -17,6 +17,7 @@ interface Customer {
   address?: string
   totalPurchase?: number
   debt?: number
+  branches?: Array<{ _id: string; name: string }>
   createdAt?: string
 }
 
