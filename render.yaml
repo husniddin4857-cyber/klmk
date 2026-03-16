@@ -33,7 +33,7 @@ services:
     name: f-mobile-frontend
     runtime: node
     plan: free
-    buildCommand: cd f-mobile && npm install && npm run build --webpack
+    buildCommand: cd f-mobile && npm install && npm run build --webpack && cd ../f-mobile-backend && npm install
     startCommand: cd f-mobile && npm start
     envVars:
       - key: NEXT_PUBLIC_API_URL
