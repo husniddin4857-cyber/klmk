@@ -4,7 +4,7 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  outputFileTracingRoot: './src',
+  outputFileTracingRoot: './',
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
