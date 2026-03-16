@@ -151,7 +151,24 @@ Render'da custom domain qo'shish:
 - Backend URL: `https://f-mobile-backend.onrender.com`
 - Frontend URL: `https://f-mobile-frontend.onrender.com`
 - Render Dashboard: https://dashboard.render.com
-- Logs: Har bir service'da "Logs" tab
+- Logs: Har bir NODE_ENV=production
+PORT=5002
+MONGODB_URI=mongodb+srv://aziz:U4yGi7ej0ePGGyXW@cluster0.k2fswkg.mongodb.net/f-mobile?retryWrites=true&w=majority&authSource=admin&appName=Cluster0
+JWT_SECRET=f-mobile-super-secret-key-2026-production
+JWT_EXPIRE=7d⚠ Warning: Next.js inferred your workspace root, but it may not be correct.
+ We detected multiple lockfiles and selected the directory of /opt/render/project/src/package-lock.json as the root directory.
+ To silence this warning, set `turbopack.root` in your Next.js config, or consider removing one of the lockfiles if it's not needed.
+   See https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack#root-directory for more information.
+ Detected additional lockfiles: 
+   * /opt/render/project/src/f-mobile/package-lock.json
+⚠ No build cache found. Please configure build caching for faster rebuilds. Read more: https://nextjs.org/docs/messages/no-cache
+▲ Next.js 16.1.6 (Turbopack)
+  Creating an optimized production build ...
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=101110
+telegram_bot_token=8021647365:AAEuiiKcK63kIWJcJXSlmj4lTtmyai5Hfog
+CORS_ORIGIN=*
+service'da "Logs" tab
 
 ---
 
