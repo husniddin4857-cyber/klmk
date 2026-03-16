@@ -1,0 +1,12 @@
+{
+  "name": "f-mobile-monorepo",
+  "version": "1.0.0",
+  "description": "F-Mobile combined frontend and backend",
+  "scripts": {
+    "build": "cd f-mobile-backend && npm install && cd ../f-mobile && npm install && npm run build",
+    "start": "node start-combined.js"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
