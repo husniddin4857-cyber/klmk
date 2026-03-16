@@ -4,11 +4,10 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  outputFileTracingRoot: './',
-  webpack: (config) => {
+  webpack: (config, { __dirname }) => {
     config.resolve.alias = {
       ...config.resolve.alias,
-      '@': './src',
+      '@': __dirname + '/src',
     };
     return config;
   },
