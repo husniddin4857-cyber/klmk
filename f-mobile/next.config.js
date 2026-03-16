@@ -4,11 +4,6 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  turbopack: {
-    resolveAlias: {
-      '@': './src',
-    },
-  },
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
